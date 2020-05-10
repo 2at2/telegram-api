@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,14 +40,12 @@ func (b *Bot) Listen(
 	messages chan Message,
 	queries chan Query,
 	callbacks chan Callback,
-	timeout time.Duration) {
-	go b.poll(messages, queries, callbacks, timeout)
-}
-
-// Run periodically polls messages and/or updates to corresponding channels
-// from the bot object.
-func (b *Bot) Start(timeout time.Duration) {
-	b.poll(b.Messages, b.Queries, b.Callbacks, timeout)
+	timeout time.Duration,
+	stop chan bool,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	b.poll(messages, queries, callbacks, timeout, stop)
 }
 
 func (b *Bot) poll(
@@ -54,46 +53,52 @@ func (b *Bot) poll(
 	queries chan Query,
 	callbacks chan Callback,
 	timeout time.Duration,
+	stop chan bool,
 ) {
 	var latestUpdate int64
 
 	for {
-		updates, err := getUpdates(b.Token,
-			latestUpdate+1,
-			int64(timeout/time.Second),
-		)
+		select {
+		case <-stop:
+			return
+		default:
+			updates, err := getUpdates(b.Token,
+				latestUpdate+1,
+				int64(timeout/time.Second),
+			)
 
-		if err != nil {
-			log.Println("failed to get updates:", err)
-			if strings.Index(err.Error(), "terminated by other long poll or webhook") > -1 {
-				log.Println("applying sleep-lock for failover instances")
-				time.Sleep(b.MultiWait)
-			}
-			continue
-		}
-
-		for _, update := range updates {
-			if update.Payload != nil /* if message */ {
-				if messages == nil {
-					continue
+			if err != nil {
+				log.Println("failed to get updates:", err)
+				if strings.Index(err.Error(), "terminated by other long poll or webhook") > -1 {
+					log.Println("applying sleep-lock for failover instances")
+					time.Sleep(b.MultiWait)
 				}
-
-				messages <- *update.Payload
-			} else if update.Query != nil /* if query */ {
-				if queries == nil {
-					continue
-				}
-
-				queries <- *update.Query
-			} else if update.Callback != nil {
-				if callbacks == nil {
-					continue
-				}
-
-				callbacks <- *update.Callback
+				continue
 			}
 
-			latestUpdate = update.ID
+			for _, update := range updates {
+				if update.Payload != nil /* if message */ {
+					if messages == nil {
+						continue
+					}
+
+					messages <- *update.Payload
+				} else if update.Query != nil /* if query */ {
+					if queries == nil {
+						continue
+					}
+
+					queries <- *update.Query
+				} else if update.Callback != nil {
+					if callbacks == nil {
+						continue
+					}
+
+					callbacks <- *update.Callback
+				}
+
+				latestUpdate = update.ID
+			}
 		}
 	}
 }
